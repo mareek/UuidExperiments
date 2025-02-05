@@ -18,32 +18,34 @@ public class SqlServerTestRunner(string instanceConnectionString)
         if (!TryConnectToServer())
             return;
 
+        var chrono = Stopwatch.StartNew();
         try
         {
             CreateDb();
 
-            decimal fragmentation;
-            TimeSpan duration;
-
-            Console.WriteLine($"Inserting {insertCount:#,##0} lines using Guid.NewGuid {runCount} times");
-            (fragmentation, duration) = LaunchMultirunTest(runCount, insertCount, smallTable, Guid.NewGuid);
-            Console.WriteLine($"Fragementation is {fragmentation:#0.0} % in {duration.TotalSeconds:#0.0} s.");
-            Console.WriteLine();
-
-            Console.WriteLine($"Inserting {insertCount:#,##0} lines using UUIDNext {runCount} times");
-            (fragmentation, duration) = LaunchMultirunTest(runCount, insertCount, smallTable, () => Uuid.NewDatabaseFriendly(Database.SqlServer));
-            Console.WriteLine($"Fragementation is {fragmentation:#0.0} % in {duration.TotalSeconds:#0.0} s.");
-            Console.WriteLine();
-
-            Console.WriteLine($"Inserting {insertCount:#,##0} lines using Guid.CreateVersion7 {runCount} times");
-            (fragmentation, duration) = LaunchMultirunTest(runCount, insertCount, smallTable, Guid.CreateVersion7);
-            Console.WriteLine($"Fragementation is {fragmentation:#0.0} % in {duration.TotalSeconds:#0.0} s.");
-            Console.WriteLine();
+            WriteTestReport(insertCount, smallTable, runCount, "Guid.NewGuid", Guid.NewGuid);
+            WriteTestReport(insertCount, smallTable, runCount, "UUIDNext", () => Uuid.NewDatabaseFriendly(Database.SqlServer));
+            WriteTestReport(insertCount, smallTable, runCount, "Guid.CreateVersion7", Guid.CreateVersion7);
         }
         finally
         {
             DropDatabase();
         }
+
+        chrono.Stop();
+        Console.WriteLine();
+        Console.WriteLine($"Total Test run duration : {chrono.Elapsed.TotalSeconds:#0.0}s.");
+    }
+
+    private void WriteTestReport(int insertCount, bool smallTable, int runCount, string methodName, Func<Guid> guidFactory)
+    {
+        Console.WriteLine($"Inserting {insertCount:#,##0} lines using {methodName} {runCount} times");
+        var testResult = LaunchMultirunTest(runCount, insertCount, smallTable, guidFactory);
+        Console.WriteLine($"Fragementation is {testResult.Fragmentation:#0.0} % ");
+        Console.WriteLine($"Insert         : {testResult.InsertDuration.TotalSeconds:#0.0} s.");
+        Console.WriteLine($"Select success : {testResult.SelectSuccessDuration.TotalSeconds:#0.0} s.");
+        Console.WriteLine($"Select fail    : {testResult.SelectFailDuration.TotalSeconds:#0.0} s.");
+        Console.WriteLine();
     }
 
     private void CreateDb()
@@ -53,18 +55,26 @@ public class SqlServerTestRunner(string instanceConnectionString)
         ExecuteNonQuery(serverConnection, $"CREATE DATABASE {DatabaseName};");
     }
 
-    public (decimal fragmentation, TimeSpan duration) LaunchMultirunTest(int runCount, int insertCount, bool smallTable, Func<Guid> guidFactory)
+    private TestResult LaunchMultirunTest(int runCount, int insertCount, bool smallTable, Func<Guid> guidFactory)
     {
-        List<(decimal fragmentation, TimeSpan duration)> results = [];
+        List<TestResult> results = [];
         for (int i = 0; i < runCount; i++)
             results.Add(RunTest(insertCount, smallTable, guidFactory));
 
-        var medianFrag = GetMedian(results.Select(r => r.fragmentation));
-        var medianDurationMs = GetMedian(results.Select(r => r.duration.TotalMilliseconds));
-
-        return (medianFrag, TimeSpan.FromMilliseconds(medianDurationMs));
+        return GetMedian(results);
     }
 
+    private static TestResult GetMedian(IReadOnlyCollection<TestResult> results)
+        => new(GetMedian(results.Select(r => r.Fragmentation)),
+               GetMedian(results.Select(r => r.InsertDuration)),
+               GetMedian(results.Select(r => r.SelectSuccessDuration)),
+               GetMedian(results.Select(r => r.SelectFailDuration)));
+
+    private static TimeSpan GetMedian(IEnumerable<TimeSpan> values)
+    {
+        var medianMS = GetMedian(values.Select(t => t.TotalMilliseconds));
+        return TimeSpan.FromMilliseconds(medianMS);
+    }
     private static T GetMedian<T>(IEnumerable<T> values)
         where T : INumber<T>
     {
@@ -82,7 +92,7 @@ public class SqlServerTestRunner(string instanceConnectionString)
         return medianOdd;
     }
 
-    public (decimal fragmentation, TimeSpan duration) RunTest(int insertCount, bool smallTable, Func<Guid> guidFactory)
+    private TestResult RunTest(int insertCount, bool smallTable, Func<Guid> guidFactory)
     {
         using var dbConnection = OpenDbConnection();
 
@@ -90,12 +100,13 @@ public class SqlServerTestRunner(string instanceConnectionString)
 
         try
         {
-            Stopwatch chrono = new();
-            InsertData(dbConnection, insertCount, guidFactory, smallTable, chrono);
-
+            Stopwatch insertChrono = new();
+            var ids = InsertData(dbConnection, insertCount, guidFactory, smallTable, insertChrono);
+            var selectSuccessDuration = RetrieveData(dbConnection, ids);
+            var selectFailDuration = RetrieveData(dbConnection, ids.Select(_ => Guid.NewGuid()).ToArray());
             var fragmentation = ReadFragmentation(dbConnection);
 
-            return (fragmentation, chrono.Elapsed);
+            return new(fragmentation, insertChrono.Elapsed, selectSuccessDuration, selectFailDuration);
         }
         finally
         {
@@ -149,18 +160,20 @@ public class SqlServerTestRunner(string instanceConnectionString)
     private static readonly DateOnly[] DatePool = [new(2000, 1, 1), new(1975, 12, 5), new(2014, 10, 17), new(1944, 6, 6), new(1952, 1, 28), new(1978, 8, 28), new(1991, 7, 12), new(2008, 10, 12),];
     private static readonly string[] NamePool = ["Katayun", "Bernd", "Swapna", "Trishna", "Keir", "Borislava", "Ricarda", "Sigismondo", "Marianna", "Doroteja", "Bandile", "Gülizar", "Sieuwerd", "Tarek", "Aleksej"];
     private const string LoremIpsum = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Morbi a elit eros. Aenean mauris mi, euismod non lobortis non, varius id mi. Praesent vehicula suscipit ante molestie euismod. Nunc non tellus ut nisl ullamcorper rutrum. Aenean pharetra gravida varius. Nulla eget metus lobortis, euismod odio.";
-    private void InsertData(SqlConnection connection, int insertCount, Func<Guid> guidFactory, bool smallTable, Stopwatch chrono)
+    private IReadOnlyCollection<Guid> InsertData(SqlConnection connection, int insertCount, Func<Guid> guidFactory, bool smallTable, Stopwatch chrono)
     {
         const int chunkSize = 128;
+        const int samplePerChunkSize = 5;
+
+        List<Guid> result = [];
         var chunks = Enumerable.Range(0, insertCount)
                                .Select(i => (value: i, uuid: guidFactory()))
                                .Chunk(chunkSize);
         foreach (var chunk in chunks)
         {
-
             var columns = smallTable ? "UUID, value" : "UUID, BirthDate, FirstName, LastName, Message";
             var valuesToInsert = smallTable
-                ? chunk.Select((d, i) => $"( @uuid{i}, {d.value})")
+                ? chunk.Select((d, i) => $"(@uuid{i}, {d.value})")
                 : chunk.Select((_, i) => $"(@uuid{i}, @birthDate{i}, @firstName{i}, @lastName{i}, @message{i})");
 
             var insertCommand = connection.CreateCommand();
@@ -184,7 +197,32 @@ public class SqlServerTestRunner(string instanceConnectionString)
             chrono.Start();
             insertCommand.ExecuteNonQuery();
             chrono.Stop();
+
+            for (int i = 0; i < samplePerChunkSize; i++)
+                result.Add(chunk[Random.Shared.Next(chunk.Length)].uuid);
         }
+
+        return result;
+    }
+
+    private TimeSpan RetrieveData(SqlConnection connection, IReadOnlyCollection<Guid> ids)
+    {
+        const string query = $"SELECT * FROM {TableName} WHERE UUID = @uuid";
+        Stopwatch chrono = new();
+
+        foreach (var id in ids)
+        {
+            using SqlCommand command = connection.CreateCommand();
+            command.CommandText = query;
+            command.Parameters.AddWithValue("@uuid", id);
+
+            chrono.Start();
+            using var reader = command.ExecuteReader();
+            reader.Read();
+            chrono.Stop();
+        }
+
+        return chrono.Elapsed;
     }
 
     private decimal ReadFragmentation(SqlConnection connection)
@@ -233,4 +271,8 @@ public class SqlServerTestRunner(string instanceConnectionString)
         command.CommandText = query;
         command.ExecuteNonQuery();
     }
+    private record TestResult(decimal Fragmentation,
+                              TimeSpan InsertDuration,
+                              TimeSpan SelectSuccessDuration,
+                              TimeSpan SelectFailDuration);
 }
