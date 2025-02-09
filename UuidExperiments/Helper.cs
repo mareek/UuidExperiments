@@ -1,4 +1,5 @@
 ﻿using System.Numerics;
+using Microsoft.Data.SqlClient;
 
 namespace UuidExperiments;
 
@@ -27,4 +28,10 @@ internal static class Helper
         return medianOdd;
     }
 
+    public static void ExecuteNonQuery(this SqlConnection connection, string query)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = query;
+        command.ExecuteNonQuery();
+    }
 }

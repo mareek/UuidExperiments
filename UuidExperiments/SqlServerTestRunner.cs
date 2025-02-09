@@ -24,17 +24,16 @@ public class SqlServerTestRunner(string instanceConnectionString)
             using var dbConnection = OpenDbConnection();
 
             Console.WriteLine("Guid.NewGuid");
-            TestRunner newGuidParams = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, Guid.NewGuid);
-            WriteReport(newGuidParams.LaunchMultirunTest(dbConnection));
+            TestRun newGuidRun = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, Guid.NewGuid);
+            WriteReport(newGuidRun.LaunchMultirunTest(dbConnection));
 
             Console.WriteLine("UUIDNext");
-            TestRunner uuidNextParams = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, () => Uuid.NewDatabaseFriendly(Database.SqlServer));
-            WriteReport(uuidNextParams.LaunchMultirunTest(dbConnection));
-
+            TestRun uuidNextRun = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, () => Uuid.NewDatabaseFriendly(Database.SqlServer));
+            WriteReport(uuidNextRun.LaunchMultirunTest(dbConnection));
 
             Console.WriteLine("Guid.CreateVersion7");
-            TestRunner createVersion7Params = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, Guid.CreateVersion7);
-            WriteReport(createVersion7Params.LaunchMultirunTest(dbConnection));
+            TestRun createVersion7Run = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, Guid.CreateVersion7);
+            WriteReport(createVersion7Run.LaunchMultirunTest(dbConnection));
         }
         finally
         {
@@ -55,13 +54,6 @@ public class SqlServerTestRunner(string instanceConnectionString)
         Console.WriteLine();
     }
 
-    private void CreateDb()
-    {
-        Console.WriteLine("Create DB");
-        using var serverConnection = OpenServerConnection();
-        ExecuteNonQuery(serverConnection, $"CREATE DATABASE {DatabaseName};");
-    }
-
     private bool TryConnectToServer()
     {
         using SqlConnection connection = new(_instanceConnectionString);
@@ -78,6 +70,25 @@ public class SqlServerTestRunner(string instanceConnectionString)
         }
     }
 
+    private void CreateDb()
+    {
+        Console.WriteLine("Create DB");
+        using var serverConnection = OpenServerConnection();
+        serverConnection.ExecuteNonQuery($"CREATE DATABASE {DatabaseName};");
+    }
+
+    private void DropDatabase()
+    {
+        Console.WriteLine("Drop database");
+        using SqlConnection serverConnection = OpenServerConnection();
+        const string dropQuery = $"""
+            use master ;
+            alter database {DatabaseName} set single_user with rollback immediate;
+            drop database {DatabaseName};
+            """;
+        serverConnection.ExecuteNonQuery(dropQuery);
+    }
+
     private SqlConnection OpenServerConnection() => OpenConnection(_instanceConnectionString);
 
     private SqlConnection OpenDbConnection() => OpenConnection(_dbConnectionString);
@@ -87,24 +98,5 @@ public class SqlServerTestRunner(string instanceConnectionString)
         SqlConnection connection = new(connectionString);
         connection.Open();
         return connection;
-    }
-
-    private void DropDatabase()
-    {
-        Console.WriteLine("Drop database");
-        using SqlConnection serverConnection = OpenServerConnection();
-        var dropQuery = $"""
-            use master ;
-            alter database {DatabaseName} set single_user with rollback immediate;
-            drop database {DatabaseName};
-            """;
-        ExecuteNonQuery(serverConnection, dropQuery);
-    }
-
-    private void ExecuteNonQuery(SqlConnection connection, string query)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = query;
-        command.ExecuteNonQuery();
     }
 }
