@@ -11,7 +11,7 @@ public class SqlServerTestRunner(string instanceConnectionString)
     string _instanceConnectionString = instanceConnectionString;
     string _dbConnectionString = $"{instanceConnectionString};Database={DatabaseName}";
 
-    public void LaunchFullRun(int insertCount, TableSize tableSize, bool batchInsert, int runCount = 10)
+    public void LaunchFullRun(int insertCount, TableSize tableSize, bool batchInsert, int runCount)
     {
         if (!TryConnectToServer())
             return;
@@ -23,16 +23,16 @@ public class SqlServerTestRunner(string instanceConnectionString)
 
             using var dbConnection = OpenDbConnection();
 
-            WriteTestIntro(insertCount, runCount, "Guid.NewGuid");
+            Console.WriteLine("Guid.NewGuid");
             TestRunner newGuidParams = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, Guid.NewGuid);
             WriteReport(newGuidParams.LaunchMultirunTest(dbConnection));
 
-            WriteTestIntro(insertCount, runCount, "UUIDNext");
+            Console.WriteLine("UUIDNext");
             TestRunner uuidNextParams = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, () => Uuid.NewDatabaseFriendly(Database.SqlServer));
             WriteReport(uuidNextParams.LaunchMultirunTest(dbConnection));
 
 
-            WriteTestIntro(insertCount, runCount, "Guid.CreateVersion7");
+            Console.WriteLine("Guid.CreateVersion7");
             TestRunner createVersion7Params = new(DatabaseName, runCount, insertCount, tableSize, batchInsert, Guid.CreateVersion7);
             WriteReport(createVersion7Params.LaunchMultirunTest(dbConnection));
         }
@@ -45,9 +45,6 @@ public class SqlServerTestRunner(string instanceConnectionString)
         Console.WriteLine();
         Console.WriteLine($"Total Test run duration : {chrono.Elapsed.TotalSeconds:#0.0}s.");
     }
-
-    private static void WriteTestIntro(int insertCount, int runCount, string methodName)
-        => Console.WriteLine($"Inserting {insertCount:#,##0} lines using {methodName} {runCount} times");
 
     private static void WriteReport(TestResult testResult)
     {
