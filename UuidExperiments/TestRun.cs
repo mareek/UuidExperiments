@@ -3,7 +3,7 @@ using Microsoft.Data.SqlClient;
 
 namespace UuidExperiments;
 
-internal class TestRunner(string databaseName, int runCount, int insertCount, TableSize tableSize, bool batchInsert, Func<Guid> guidFactory)
+internal class TestRun(string databaseName, int runCount, int insertCount, TableSize tableSize, bool batchInsert, Func<Guid> guidFactory)
 {
     const string TableName = "uuidTestTable";
 
@@ -23,7 +23,7 @@ internal class TestRunner(string databaseName, int runCount, int insertCount, Ta
         try
         {
             Stopwatch insertChrono = new();
-            var ids = InsertData(dbConnection, insertChrono);
+            var ids = batchInsert ? InsertDataBatch(dbConnection, insertChrono) : InsertData(dbConnection, insertChrono);
             var selectSuccessDuration = RetrieveData(dbConnection, ids);
             var selectFailDuration = RetrieveData(dbConnection, ids.Select(_ => Guid.NewGuid()).ToArray());
             var fragmentation = ReadFragmentation(dbConnection);
@@ -32,9 +32,8 @@ internal class TestRunner(string databaseName, int runCount, int insertCount, Ta
         }
         finally
         {
-            ExecuteNonQuery(dbConnection, $"DROP TABLE {TableName};");
+            dbConnection.ExecuteNonQuery($"DROP TABLE {TableName};");
         }
-
     }
 
     private void CreateTable(SqlConnection dbConnection)
@@ -52,33 +51,27 @@ internal class TestRunner(string databaseName, int runCount, int insertCount, Ta
                              """,
             _ => $"CREATE TABLE {TableName} (UUID uniqueIdentifier NOT NULL, value int NOT NULL, PRIMARY KEY (UUID));"
         };
-        ExecuteNonQuery(dbConnection, query);
+        dbConnection.ExecuteNonQuery(query);
     }
 
-    private static readonly DateOnly[] DatePool = [new(2000, 1, 1), new(1975, 12, 5), new(2014, 10, 17), new(1944, 6, 6), new(1952, 1, 28), new(1978, 8, 28), new(1991, 7, 12), new(2008, 10, 12),];
-    private static readonly string[] NamePool = ["Katayun", "Bernd", "Swapna", "Trishna", "Keir", "Borislava", "Ricarda", "Sigismondo", "Marianna", "Doroteja", "Bandile", "Gülizar", "Sieuwerd", "Tarek", "Aleksej"];
-    private const string LoremIpsum = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Morbi a elit eros. Aenean mauris mi, euismod non lobortis non, varius id mi. Praesent vehicula suscipit ante molestie euismod. Nunc non tellus ut nisl ullamcorper rutrum. Aenean pharetra gravida varius. Nulla eget metus lobortis, euismod odio.";
-    private IReadOnlyCollection<Guid> InsertData(SqlConnection dbConnection, Stopwatch chrono)
+    private IReadOnlyCollection<Guid> InsertDataBatch(SqlConnection dbConnection, Stopwatch chrono, int batchSize = 128)
     {
-        const int chunkSize = 128;
-        const int samplePerChunkSize = 5;
-
         List<Guid> result = [];
+        var columns = tableSize switch
+        {
+            TableSize.BIG => "UUID, BirthDate, FirstName, LastName, Message",
+            _ => "UUID, value",
+        };
+
         var chunks = Enumerable.Range(0, insertCount)
                                .Select(i => (value: i, uuid: guidFactory()))
-                               .Chunk(chunkSize);
+                               .Chunk(batchSize);
         foreach (var chunk in chunks)
         {
-            var columns = tableSize switch
-            {
-                TableSize.BIG => "UUID, BirthDate, FirstName, LastName, Message",
-                _ => "UUID, value",
-            };
-
             var valuesToInsert = tableSize switch
             {
                 TableSize.BIG => chunk.Select((_, i) => $"(@uuid{i}, @birthDate{i}, @firstName{i}, @lastName{i}, @message{i})"),
-                _ => chunk.Select((d, i) => $"(@uuid{i}, {d.value})"),
+                _ => chunk.Select((d, i) => $"(@uuid{i}, @value{i})"),
             };
 
             var insertCommand = dbConnection.CreateCommand();
@@ -86,28 +79,72 @@ internal class TestRunner(string databaseName, int runCount, int insertCount, Ta
 
             for (int i = 0; i < chunk.Length; i++)
             {
-                insertCommand.Parameters.AddWithValue($"@uuid{i}", chunk[i].uuid);
-                if (tableSize == TableSize.BIG)
-                {
-                    int chunkValue = chunk[i].value;
-                    insertCommand.Parameters.AddWithValue($"@birthDate{i}", DatePool[i % DatePool.Length]);
-                    insertCommand.Parameters.AddWithValue($"@firstName{i}", NamePool[i % NamePool.Length]);
-                    insertCommand.Parameters.AddWithValue($"@lastName{i}", NamePool[chunkValue % NamePool.Length]);
-                    var messageStart = chunkValue % (LoremIpsum.Length - 50);
-                    var messageLength = 20 + i % 30;
-                    insertCommand.Parameters.AddWithValue($"@message{i}", LoremIpsum.Substring(messageStart, messageLength));
-                }
+                (int value, Guid uuid) = chunk[i];
+                AddCommandParameters(insertCommand, uuid, value, i);
+                if (value % 25 == 0)
+                    result.Add(uuid);
             }
 
             chrono.Start();
             insertCommand.ExecuteNonQuery();
             chrono.Stop();
-
-            for (int i = 0; i < samplePerChunkSize; i++)
-                result.Add(chunk[Random.Shared.Next(chunk.Length)].uuid);
         }
 
         return result;
+    }
+
+    private IReadOnlyCollection<Guid> InsertData(SqlConnection dbConnection, Stopwatch chrono)
+    {
+        const string bigInsertRequest = $"INSERT INTO {TableName} (UUID, BirthDate, FirstName, LastName, Message) VALUES (@uuid, @birthDate, @firstName, @lastName, @message);";
+        const string smallInsertRequest = $"INSERT INTO {TableName} (UUID, value) VALUES (@uuid, @value);";
+
+        List<Guid> result = [];
+        for (int i = 0; i < insertCount; i++)
+        {
+            var insertCommand = dbConnection.CreateCommand();
+            insertCommand.CommandText = tableSize switch { TableSize.BIG => bigInsertRequest, _ => smallInsertRequest, };
+
+            var uuid = guidFactory();
+            AddCommandParameters(insertCommand, uuid, i);
+
+            chrono.Start();
+            insertCommand.ExecuteNonQuery();
+            chrono.Stop();
+
+            if (i % 25 == 0)
+                result.Add(uuid);
+        }
+
+        return result;
+    }
+
+    private void AddCommandParameters(SqlCommand insertCommand, Guid uuid, int value, object? suffix = null)
+    {
+        insertCommand.Parameters.AddWithValue($"@uuid{suffix}", uuid);
+        if (tableSize == TableSize.small)
+            insertCommand.Parameters.AddWithValue($"@value{suffix}", value);
+
+        if (tableSize == TableSize.BIG)
+        {
+            insertCommand.Parameters.AddWithValue($"@birthDate{suffix}", GetRandomBirthDate());
+            insertCommand.Parameters.AddWithValue($"@firstName{suffix}", GetRandomName());
+            insertCommand.Parameters.AddWithValue($"@lastName{suffix}", GetRandomName());
+            insertCommand.Parameters.AddWithValue($"@message{suffix}", GetRandomMessage());
+        }
+    }
+
+    private static readonly string[] NamePool = ["Katayun", "Bernd", "Swapna", "Trishna", "Keir", "Borislava", "Ricarda", "Sigismondo", "Marianna", "Doroteja", "Bandile", "Gülizar", "Sieuwerd", "Tarek", "Aleksej"];
+    private static string GetRandomName() => NamePool[Random.Shared.Next(NamePool.Length)];
+
+    private static readonly DateOnly[] DatePool = [new(2000, 1, 1), new(1975, 12, 5), new(2014, 10, 17), new(1944, 6, 6), new(1952, 1, 28), new(1978, 8, 28), new(1991, 7, 12), new(2008, 10, 12),];
+    private static DateOnly GetRandomBirthDate() => DatePool[Random.Shared.Next(DatePool.Length)];
+
+    private const string LoremIpsum = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Morbi a elit eros. Aenean mauris mi, euismod non lobortis non, varius id mi. Praesent vehicula suscipit ante molestie euismod. Nunc non tellus ut nisl ullamcorper rutrum. Aenean pharetra gravida varius. Nulla eget metus lobortis, euismod odio.";
+    private static string GetRandomMessage()
+    {
+        var messageStart = Random.Shared.Next(LoremIpsum.Length - 50);
+        var messageLength = Random.Shared.Next(20, 50);
+        return LoremIpsum.Substring(messageStart, messageLength);
     }
 
     private TimeSpan RetrieveData(SqlConnection connection, IReadOnlyCollection<Guid> ids)
@@ -149,19 +186,12 @@ internal class TestRunner(string databaseName, int runCount, int insertCount, Ta
               --AND DDIPS.avg_fragmentation_in_percent > 0
             """;
 
-        ExecuteNonQuery(connection, $"EXEC sp_updatestats;");
+        connection.ExecuteNonQuery($"EXEC sp_updatestats;");
 
         using SqlCommand command = connection.CreateCommand();
         command.CommandText = query;
         using var reader = command.ExecuteReader();
         reader.Read();
         return Convert.ToDecimal(reader["avg_fragmentation_in_percent"]);
-    }
-
-    private void ExecuteNonQuery(SqlConnection connection, string query)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = query;
-        command.ExecuteNonQuery();
     }
 }
