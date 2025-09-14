@@ -3,19 +3,17 @@ using UuidExperiments;
 
 const string LocalDbConnectionString = "Server=(localdb)\\MSSQLLocalDB;Integrated Security=true;";
 
-var insertCount = getOptionValueAs<int>("--insert-count") ?? 1_000;
-var runCount = getOptionValueAs<int>("--run-count") ?? 10;
-var tableSize = getOptionValueAsEnum<TableSize>("--table-size") ?? TableSize.small;
-var batchInsert = hasOption("--batch");
+if(hasOption("--custom"))
+{
+    GenerateCustomUuids(getOptionValueAs<int>("--custom") ?? 10);
+    return;
+}
 
-Console.WriteLine($"Starting test with following params");
-Console.WriteLine($"Insert count : {insertCount}");
-Console.WriteLine($"Run count    : {runCount}");
-Console.WriteLine($"Table size   : {tableSize}");
-Console.WriteLine($"Batch        : {batchInsert}");
-Console.WriteLine();
-
-new SqlServerTestRunner(LocalDbConnectionString).LaunchFullRun(insertCount, tableSize, batchInsert, runCount);
+RunSqlServerTest(LocalDbConnectionString,
+                 getOptionValueAs<int>("--insert-count") ?? 1_000,
+                 getOptionValueAs<int>("--run-count") ?? 10,
+                 getOptionValueAsEnum<TableSize>("--table-size") ?? TableSize.small,
+                 hasOption("--batch"));
 
 int? getOptionPosition(string optionName)
 {
@@ -40,3 +38,26 @@ T? getOptionValueAs<T>(string optionName) where T : struct, IParsable<T>
 
 T? getOptionValueAsEnum<T>(string optionName) where T : struct, Enum
     => Enum.TryParse<T>(getOptionValue(optionName), ignoreCase: true, out T e) ? e : null;
+
+static void RunSqlServerTest(string LocalDbConnectionString, int insertCount, int runCount, TableSize tableSize, bool batchInsert)
+{
+    Console.WriteLine($"Starting test with following params");
+    Console.WriteLine($"Insert count : {insertCount}");
+    Console.WriteLine($"Run count    : {runCount}");
+    Console.WriteLine($"Table size   : {tableSize}");
+    Console.WriteLine($"Batch        : {batchInsert}");
+    Console.WriteLine();
+
+    new SqlServerTestRunner(LocalDbConnectionString).LaunchFullRun(insertCount, tableSize, batchInsert, runCount);
+}
+
+static void GenerateCustomUuids(int count)
+{
+    Console.WriteLine("Generating UUIDv7 with sub millisecond precision");
+    Span<Guid> uuids = stackalloc Guid[count];
+    for (int i = 0; i < count; i++)
+        uuids[i] = CustomUuidGenerator.GeneratUuidV7WithSubMillisecondPrecision();
+
+    for (int i = 0; i < count; i++)
+        Console.WriteLine(uuids[i]);
+}
